@@ -94,7 +94,7 @@ def rodape_analise(integrante: str, metodo: str):
 
 def sidebar(dfs: dict) -> dict:
     st.sidebar.image(
-        "https://www.gov.br/inep/pt-br/@@/image/logo-inep.png/@@images/image",
+        "logo_inep.png",
         width=160,
     )
     st.sidebar.title("Filtros Globais")
