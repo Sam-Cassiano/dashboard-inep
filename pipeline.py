@@ -20,7 +20,6 @@ import pandas as pd
 
 warnings.filterwarnings("ignore")
 
-
 # ── Mapeamentos ──────────────────────────────────────────────────────────────
 
 DEPENDENCIA_MAP = {1: "Federal", 2: "Estadual", 3: "Municipal", 4: "Privada"}
@@ -29,7 +28,7 @@ LOCALIZACAO_MAP = {1: "Urbana", 2: "Rural"}
 COLUNAS_CENSO = [
     # Identificação
     "CO_ENTIDADE", "NO_ENTIDADE", "SG_UF", "NO_MUNICIPIO", "CO_MUNICIPIO",
-    "TP_DEPENDENCIA", "TP_LOCALIZACAO",
+    "TP_DEPENDENCIA", "TP_LOCALIZACAO", "TP_SITUACAO_FUNCIONAMENTO",
     # Infraestrutura tecnológica
     "IN_ENERGIA_REDE_PUBLICA", "IN_ENERGIA_INEXISTENTE",
     "IN_INTERNET", "IN_BANDA_LARGA", "IN_INTERNET_ALUNOS",
@@ -39,7 +38,7 @@ COLUNAS_CENSO = [
     # Equipamentos
     "QT_DESKTOP_ALUNO", "QT_COMP_PORTATIL_ALUNO", "QT_TABLET_ALUNO",
     # Infraestrutura física
-    "IN_AGUA_POTAVEL", "IN_AGUA_INEXISTENTE",
+    "IN_AGUA_POTAVEL", "IN_AGUA_REDE_PUBLICA", "IN_AGUA_INEXISTENTE",
     "IN_ESGOTO_REDE_PUBLICA", "IN_ESGOTO_FOSSA_SEPTICA",
     "IN_ESGOTO_FOSSA_COMUM", "IN_ESGOTO_FOSSA", "IN_ESGOTO_INEXISTENTE",
     "IN_QUADRA_ESPORTES", "IN_QUADRA_ESPORTES_COBERTA", "IN_QUADRA_ESPORTES_DESCOBERTA",
@@ -62,9 +61,15 @@ def carregar_censo(path: str) -> pd.DataFrame:
         usecols=lambda c: c in COLUNAS_CENSO + ["SG_UF"],
         low_memory=False,
     )
-    # Filtro Alagoas
+    # FIX 1: Filtro Alagoas + apenas escolas ATIVAS (TP_SITUACAO_FUNCIONAMENTO == 1)
+    # Sem este filtro, escolas inativas/extintas inflam as contagens de todas as análises.
     df = df[df["SG_UF"] == "AL"].copy()
-    print(f"    → {len(df):,} escolas em AL encontradas.")
+    if "TP_SITUACAO_FUNCIONAMENTO" in df.columns:
+        antes = len(df)
+        df = df[df["TP_SITUACAO_FUNCIONAMENTO"] == 1].copy()
+        print(f"    → {len(df):,} escolas ativas em AL ({antes - len(df)} inativas removidas).")
+    else:
+        print(f"    → {len(df):,} escolas em AL encontradas.")
     return df
 
 
@@ -77,11 +82,11 @@ def _limpar_ideb_sheet(df_raw: pd.DataFrame, etapa: str) -> pd.DataFrame:
     # A linha de índice 3 contém os nomes de colunas reais (SG_UF, CO_MUNICIPIO…).
     # As colunas sem nome ficam como Unnamed: N.
     # Estratégia: localizar a linha que contém "ID_ESCOLA" ou "CO_ENTIDADE".
-
+ 
     # Encontrar linha-cabeçalho
     header_row = None
     for i, row in df_raw.iterrows():
-        vals = row.astype(str).str.upper().tolist()
+        vals = [str(v).upper() for v in row.tolist()]
         if any("ID_ESCOLA" in v or "CO_ENTIDADE" in v for v in vals):
             header_row = i
             break
@@ -103,7 +108,9 @@ def _limpar_ideb_sheet(df_raw: pd.DataFrame, etapa: str) -> pd.DataFrame:
             rename[col] = "CO_ENTIDADE"
         elif col_str == "VL_OBSERVADO_2023":
             rename[col] = "IDEB_2023"
-        elif col_str in ("VL_APROVACAO_2023_SI_4", "VL_APROVACAO_2023_TOTAL"):
+        # Detecta coluna de aprovação: INEP usa sufixos diferentes por etapa
+        # SI_4/AI_4 (Anos Iniciais), SF_4/AF_4 (Anos Finais), EM_3 (Ensino Médio), TOTAL
+        elif col_str.startswith("VL_APROVACAO_2023") and "APROVACAO_2023_RAW" not in rename.values():
             rename[col] = "APROVACAO_2023_RAW"
     df = df.rename(columns=rename)
 
@@ -159,9 +166,28 @@ def tratar_censo(df: pd.DataFrame) -> pd.DataFrame:
     df["LOCALIZACAO"] = df["TP_LOCALIZACAO"].map(LOCALIZACAO_MAP)
 
     # Binários IN_ → 0/1 numérico (tratar NaN como 0)
+    # FIX 2: Algumas colunas IN_ usam valor 9 como "não se aplica" (ex: IN_ACESSO_INTERNET_COMPUTADOR,
+    # IN_REDES_SOCIAIS). O valor 9 deve ser tratado como 0/ausente, não como presença,
+    # para evitar inflação nas médias percentuais (ex: A7).
+    # Colunas com valor 9 = "não se aplica" (tratar como 0/ausente).
+    # Inclui todas as colunas de infra que podem ter 9 no Censo 2023.
+    COLS_COM_VALOR_9 = {
+        "IN_ACESSO_INTERNET_COMPUTADOR", "IN_ACES_INTERNET_DISP_PESSOAIS",
+        "IN_REDES_SOCIAIS", "IN_ESPACO_ATIVIDADE", "IN_ESPACO_EQUIPAMENTO",
+        "IN_EXAME_SELECAO", "IN_TRATAMENTO_LIXO_SEPARACAO",
+        "IN_TRATAMENTO_LIXO_REUTILIZA", "IN_TRATAMENTO_LIXO_RECICLAGEM",
+        "IN_TRATAMENTO_LIXO_INEXISTENTE",
+        # Saneamento — valor 9 inflaciona médias de água e esgoto
+        "IN_AGUA_POTAVEL", "IN_AGUA_REDE_PUBLICA", "IN_AGUA_INEXISTENTE",
+        "IN_ESGOTO_REDE_PUBLICA", "IN_ESGOTO_FOSSA_SEPTICA",
+        "IN_ESGOTO_FOSSA_COMUM", "IN_ESGOTO_FOSSA", "IN_ESGOTO_INEXISTENTE",
+    }
     cols_in = [c for c in df.columns if c.startswith("IN_")]
     for c in cols_in:
-        df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0).astype(int)
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+        if c in COLS_COM_VALOR_9:
+            df[c] = df[c].replace(9, np.nan)
+        df[c] = df[c].fillna(0).astype(int)
 
     # Variáveis de quantidade
     cols_qt = [c for c in df.columns if c.startswith("QT_")]
@@ -180,11 +206,21 @@ def tratar_censo(df: pd.DataFrame) -> pd.DataFrame:
     # Presença de energia (qualquer fonte)
     df["IN_ENERGIA_DISPONIVEL"] = np.where(df["IN_ENERGIA_INEXISTENTE"] == 1, 0, 1)
 
-    # Presença de água potável (já existe IN_AGUA_POTAVEL)
-    # Presença de esgoto (qualquer tipo exceto inexistente)
-    df["IN_ESGOTO_DISPONIVEL"] = np.where(df["IN_ESGOTO_INEXISTENTE"] == 1, 0, 1)
+    # Presença de água potável — IN_AGUA_POTAVEL usado diretamente (já é 0/1)
 
-    # Índice de Infraestrutura Tecnológica (0-3): energia + banda larga + lab informática
+    # Presença de esgoto — definição positiva: qualquer sistema declarado
+    # (rede pública OU fossa séptica OU fossa comum OU outra fossa)
+    # Escolas com todos os campos = 0 → sem esgoto (não marcaram nada).
+    # Valor 9 já foi tratado como 0 em COLS_COM_VALOR_9 acima.
+    df["IN_ESGOTO_DISPONIVEL"] = np.where(
+        (df["IN_ESGOTO_REDE_PUBLICA"] == 1) |
+        (df["IN_ESGOTO_FOSSA_SEPTICA"] == 1) |
+        (df["IN_ESGOTO_FOSSA_COMUM"] == 1) |
+        (df["IN_ESGOTO_FOSSA"] == 1),
+        1, 0
+    )
+
+    # Índice de Infraestrutura Tecnológica (0-3): energia + banda larga + lab ciências
     df["IDX_INFRA_TEC"] = (
         df["IN_ENERGIA_DISPONIVEL"]
         + df["IN_BANDA_LARGA"]
@@ -192,8 +228,9 @@ def tratar_censo(df: pd.DataFrame) -> pd.DataFrame:
     )
 
     # Espaço de leitura (biblioteca OU sala de leitura)
+    # Conforme relatório: apenas IN_BIBLIOTECA e IN_SALA_LEITURA
     df["IN_ESPACO_LEITURA"] = np.where(
-        (df["IN_BIBLIOTECA"] == 1) | (df["IN_BIBLIOTECA_SALA_LEITURA"] == 1) | (df["IN_SALA_LEITURA"] == 1),
+        (df["IN_BIBLIOTECA"] == 1) | (df["IN_SALA_LEITURA"] == 1),
         1, 0
     )
 
@@ -245,6 +282,18 @@ def merge_censo_ideb(censo: pd.DataFrame, ideb: pd.DataFrame) -> pd.DataFrame:
 
 def gerar_analises(df: pd.DataFrame, output_dir: str):
     os.makedirs(output_dir, exist_ok=True)
+
+    # ── BASE COMPLETA: censo_al.parquet (usado pela Visão Geral e filtros do dashboard) ──
+    cols_censo = [c for c in [
+        "CO_ENTIDADE", "NO_ENTIDADE", "DEPENDENCIA", "LOCALIZACAO", "NO_MUNICIPIO",
+        "QT_MAT_BAS", "QT_MAT_FUND_AI", "QT_MAT_FUND_AF", "QT_MAT_MED",
+        "IN_INTERNET", "IN_BANDA_LARGA", "IN_LABORATORIO_INFORMATICA", "IN_LABORATORIO_CIENCIAS",
+        "IN_ENERGIA_DISPONIVEL", "IN_AGUA_POTAVEL", "IN_ESGOTO_DISPONIVEL",
+        "IN_QUADRA_ESPORTES", "IN_ESPACO_LEITURA", "IN_EQUIP_MULTIMIDIA", "IN_EQUIP_LOUSA_DIGITAL",
+        "IDX_INFRA_TEC", "IDEB_2023", "TAXA_APROVACAO", "PORTE",
+    ] if c in df.columns]
+    df[cols_censo].to_parquet(os.path.join(output_dir, "censo_al.parquet"), index=False)
+    print(f"    → censo_al.parquet: {len(df):,} escolas.")
 
     # ── ANÁLISE 1 (Guilherme): Computadores por Dependência ─────────────────
     a1 = df[["CO_ENTIDADE", "NO_ENTIDADE", "DEPENDENCIA", "LOCALIZACAO",
@@ -311,10 +360,17 @@ def gerar_analises(df: pd.DataFrame, output_dir: str):
     a7.to_parquet(os.path.join(output_dir, "analise7_inclusao_digital.parquet"), index=False)
 
     # ── ANÁLISE 8 (Matheus): Saneamento Básico por Zona ─────────────────────
-    a8 = df[["CO_ENTIDADE", "NO_ENTIDADE", "DEPENDENCIA", "LOCALIZACAO",
-             "IN_AGUA_POTAVEL", "IN_AGUA_INEXISTENTE",
-             "IN_ESGOTO_DISPONIVEL", "IN_ESGOTO_INEXISTENTE",
-             "QT_MAT_BAS"]].copy()
+    # Saneamento: usa rede pública como critério (alinha com relatório)
+    # IN_AGUA_REDE_PUBLICA = ligada à rede pública de água (~69.9% rural no relatório)
+    # IN_ESGOTO_REDE_PUBLICA = ligada à rede pública de esgoto (~70.7% rural no relatório)
+    cols_a8 = ["CO_ENTIDADE", "NO_ENTIDADE", "DEPENDENCIA", "LOCALIZACAO",
+               "IN_AGUA_POTAVEL", "IN_AGUA_INEXISTENTE", "QT_MAT_BAS",
+               "IN_ESGOTO_DISPONIVEL", "IN_ESGOTO_INEXISTENTE"]
+    # Adiciona colunas de rede pública se disponíveis no dataset
+    for c in ["IN_AGUA_REDE_PUBLICA", "IN_ESGOTO_REDE_PUBLICA"]:
+        if c in df.columns:
+            cols_a8.append(c)
+    a8 = df[cols_a8].copy()
     a8 = a8[a8["LOCALIZACAO"].notna()]
     a8.to_parquet(os.path.join(output_dir, "analise8_saneamento.parquet"), index=False)
 
@@ -346,24 +402,28 @@ def main():
     parser.add_argument("--output", default="dados_tratados", help="Diretório de saída (default: dados_tratados/)")
     args = parser.parse_args()
 
-    # 1. Carregar
-    censo_raw = carregar_censo(args.censo)
-    ideb_raw = carregar_ideb(args.ideb_medio, args.ideb_iniciais, args.ideb_finais)
+    print("=" * 60)
+    print("  Pipeline — Censo Escolar AL 2023 × IDEB 2023")
+    print("=" * 60)
 
-    # 2. Tratar
-    censo_limpo = tratar_censo(censo_raw)
+    print("\n[1/4] Carregando Censo Escolar...")
+    censo = carregar_censo(args.censo)
 
-    # 3. Merge
-    df_final = merge_censo_ideb(censo_limpo, ideb_raw)
+    print("\n[2/4] Carregando IDEB...")
+    ideb = carregar_ideb(args.ideb_medio, args.ideb_iniciais, args.ideb_finais)
 
-    # 4. Salvar base completa
-    censo_path = os.path.join(args.output, "censo_al.parquet")
-    os.makedirs(args.output, exist_ok=True)
-    df_final.to_parquet(censo_path, index=False)
-    print(f"\n📦 Base completa salva: {censo_path} ({len(df_final):,} escolas)")
+    print("\n[3/4] Tratando Censo...")
+    censo = tratar_censo(censo)
 
-    # 5. Gerar 9 datasets
-    gerar_analises(df_final, args.output)
+    print("\n[4/4] Fazendo merge Censo × IDEB...")
+    df = merge_censo_ideb(censo, ideb)
+
+    print("\n[5/5] Gerando datasets de análise...")
+    gerar_analises(df, args.output)
+
+    print("\n" + "=" * 60)
+    print("  Pipeline concluído com sucesso!")
+    print("=" * 60)
 
 
 if __name__ == "__main__":
