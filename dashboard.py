@@ -8,7 +8,7 @@ Uso após rodar o pipeline:
 Ou com caminho padrão:
     streamlit run dashboard.py
 """
-
+ 
 import os
 import sys
 import argparse
@@ -94,8 +94,8 @@ def rodape_analise(integrante: str, metodo: str):
 
 def sidebar(dfs: dict) -> dict:
     st.sidebar.image(
-    "logo_inep.png",
-    width=160,
+        "https://www.gov.br/inep/pt-br/@@/image/logo-inep.png/@@images/image",
+        width=160,
     )
     st.sidebar.title("Filtros Globais")
 
@@ -294,7 +294,8 @@ def aba_analise2(dfs: dict, filtros: dict):
     if len(sim) > 1 and len(nao) > 1:
         t_stat, p_val = stats.ttest_ind(sim, nao, equal_var=False)
         sig = "✅ Significativa (p < 0,05)" if p_val < 0.05 else "❌ Não significativa"
-        st.info(f"**Teste t de Welch:** t = {t_stat:.2f} · p = {p_val:.4f} · {sig}")
+        p_fmt = f"{p_val:.2e}" if p_val < 0.001 else f"{p_val:.4f}"
+        st.info(f"**Teste t de Welch:** t = {t_stat:.2f} · p = {p_fmt} · {sig}")
 
     # Proporção por porte
     st.subheader("Proporção com Banda Larga por Porte da Escola")
@@ -410,15 +411,13 @@ def aba_analise4(dfs: dict, filtros: dict):
         st.plotly_chart(fig, use_container_width=True)
 
     with col2:
-        r, p = stats.pearsonr(
-            df["IDX_INFRA_TEC"].fillna(0), df["IDEB_2023"].dropna()
-        ) if len(df.dropna(subset=["IDEB_2023"])) > 2 else (0, 1)
-        # Usar apenas linhas com ambas as colunas
         df_c = df.dropna(subset=["IDX_INFRA_TEC", "IDEB_2023"])
+        r, p = (0.0, 1.0)
         if len(df_c) > 2:
             r, p = stats.pearsonr(df_c["IDX_INFRA_TEC"], df_c["IDEB_2023"])
+        p_fmt = f"{p:.2e}" if p < 0.001 else f"{p:.4f}"
         st.metric("Correlação de Pearson (r)", f"{r:.3f}")
-        st.metric("p-valor", f"{p:.4f}")
+        st.metric("p-valor", p_fmt)
         sig = "✅ Significativa" if p < 0.05 else "❌ Não significativa"
         st.markdown(f"**Significância:** {sig}")
         st.markdown("---")
@@ -461,7 +460,10 @@ def aba_analise5(dfs: dict, filtros: dict):
     col_aprov = "TAXA_APROVACAO" if "TAXA_APROVACAO" in df.columns and df["TAXA_APROVACAO"].notna().sum() > 50 else "IDEB_2023"
     label_y = "Taxa de Aprovação (%)" if col_aprov == "TAXA_APROVACAO" else "IDEB 2023"
 
-    df_v = df.dropna(subset=[col_aprov])
+    df_v = df.dropna(subset=[col_aprov]).copy()
+    # Converter escala 0–1 → 0–100 se necessário
+    if col_aprov == "TAXA_APROVACAO" and df_v[col_aprov].mean() < 2.0:
+        df_v[col_aprov] = df_v[col_aprov] * 100
     if df_v.empty:
         st.warning("Sem dados de aprovação disponíveis neste filtro.")
         return
@@ -619,7 +621,9 @@ def aba_analise7(dfs: dict, filtros: dict):
     rows = []
     for nome, col in indicadores.items():
         if col in df.columns:
-            total_sim = df[col].sum()
+            # Valor 9 = "não se aplica" → tratar como 0
+            col_vals = df[col].replace(9, 0)
+            total_sim = (col_vals == 1).sum()
             pct = total_sim / n * 100 if n > 0 else 0
             rows.append({"Indicador": nome, "Com": int(total_sim), "Sem": int(n - total_sim), "% com": round(pct, 1)})
     res = pd.DataFrame(rows)
@@ -692,8 +696,8 @@ def aba_analise8(dfs: dict, filtros: dict):
         return
 
     indicadores = {
-        "Água Potável": "IN_AGUA_POTAVEL",
-        "Esgoto (qualquer)": "IN_ESGOTO_DISPONIVEL",
+        "Água Potável":   "IN_AGUA_POTAVEL",
+        "Esgoto":         "IN_ESGOTO_DISPONIVEL",
     }
 
     rows = []
@@ -734,13 +738,22 @@ def aba_analise8(dfs: dict, filtros: dict):
         use_container_width=True, hide_index=True,
     )
 
-    # Alertas
-    agua_rural = res[(res["Indicador"] == "Água Potável") & (res["Localização"] == "Rural")]["Não Possui (%)"]
-    if not agua_rural.empty:
-        st.error(
-            f"🚨 **{agua_rural.values[0]:.1f}% das escolas rurais** não têm acesso à água potável — "
-            "condição que viola os ODS 3 e 6 e compromete a saúde e permanência dos alunos."
-        )
+    # Alertas dinâmicos baseados nos dados
+    agua_rural_sem = res[(res["Indicador"] == "Água Potável") & (res["Localização"] == "Rural")]["Não Possui (%)"]
+    agua_rural_sim = res[(res["Indicador"] == "Água Potável") & (res["Localização"] == "Rural")]["Possui (%)"]
+    if not agua_rural_sem.empty:
+        pct_sem = agua_rural_sem.values[0]
+        pct_sim = agua_rural_sim.values[0] if not agua_rural_sim.empty else 0
+        if pct_sem > 10:
+            st.error(
+                f"🚨 **{pct_sem:.1f}% das escolas rurais ativas** não têm acesso à água potável — "
+                "condição que viola os ODS 3 e 6 e compromete a saúde e permanência dos alunos."
+            )
+        else:
+            st.success(
+                f"✅ **{pct_sim:.1f}% das escolas rurais ativas** têm acesso à água potável. "
+                f"Apenas {pct_sem:.1f}% sem cobertura — referente ao conjunto de escolas em funcionamento."
+            )
 
     # Qui-quadrado
     st.subheader("Testes Qui-Quadrado — Saneamento × Localização")
@@ -769,26 +782,32 @@ def aba_analise9(dfs: dict, filtros: dict):
         st.warning("Dataset não disponível.")
         return
 
-    df_v = df.dropna(subset=["IDEB_2023"])
-    df_v["Espaço de Leitura"] = df_v["IN_ESPACO_LEITURA"].map({1: "Com Biblioteca/Leitura", 0: "Sem Biblioteca/Leitura"})
+    if "TAXA_APROVACAO" not in df.columns or df["TAXA_APROVACAO"].notna().sum() < 10:
+        st.warning("TAXA_APROVACAO não disponível neste dataset.")
+        return
+    df_v = df.dropna(subset=["TAXA_APROVACAO"]).copy()
+    # Converter escala 0–1 → 0–100 se necessário
+    if df_v["TAXA_APROVACAO"].mean() < 2.0:
+        df_v["TAXA_APROVACAO"] = df_v["TAXA_APROVACAO"] * 100
+    df_v["Espaço de Leitura"] = df_v["IN_ESPACO_LEITURA"].map({1: "Com Biblioteca", 0: "Sem Biblioteca"})
 
     col1, col2 = st.columns([3, 1])
     with col1:
         fig = px.box(
-            df_v, x="Espaço de Leitura", y="IDEB_2023",
+            df_v, x="Espaço de Leitura", y="TAXA_APROVACAO",
             color="Espaço de Leitura",
             color_discrete_map={
-                "Com Biblioteca/Leitura": "#636EFA",
-                "Sem Biblioteca/Leitura": "#EF553B",
+                "Com Biblioteca": "#636EFA",
+                "Sem Biblioteca": "#EF553B",
             },
             points=False,
-            title="Distribuição do IDEB por Presença de Espaço de Leitura",
-            labels={"IDEB_2023": "IDEB 2023"},
+            title="Distribuição da Taxa de Aprovação por Presença de Biblioteca",
+            labels={"TAXA_APROVACAO": "Taxa de Aprovação (%)"},
         )
         st.plotly_chart(fig, use_container_width=True)
 
     with col2:
-        grp = df_v.groupby("Espaço de Leitura")["IDEB_2023"].agg(
+        grp = df_v.groupby("Espaço de Leitura")["TAXA_APROVACAO"].agg(
             Mediana="median", Média="mean", N="count"
         ).round(2).reset_index()
         st.dataframe(grp, use_container_width=True, hide_index=True)
@@ -802,26 +821,26 @@ def aba_analise9(dfs: dict, filtros: dict):
     dep_rows = []
     for dep in df_v["DEPENDENCIA"].dropna().unique():
         sub = df_v[df_v["DEPENDENCIA"] == dep]
-        for label in ["Com Biblioteca/Leitura", "Sem Biblioteca/Leitura"]:
-            val = sub[sub["Espaço de Leitura"] == label]["IDEB_2023"]
+        for label in ["Com Biblioteca", "Sem Biblioteca"]:
+            val = sub[sub["Espaço de Leitura"] == label]["TAXA_APROVACAO"]
             dep_rows.append({
                 "Dependência": dep,
                 "Espaço de Leitura": label,
-                "IDEB Mediana": round(val.median(), 2) if len(val) else None,
+                "Aprovação Mediana (%)": round(val.median(), 2) if len(val) else None,
                 "N": len(val),
             })
-    dep_df = pd.DataFrame(dep_rows).dropna(subset=["IDEB Mediana"])
+    dep_df = pd.DataFrame(dep_rows).dropna(subset=["Aprovação Mediana (%)"])
     fig2 = px.bar(
-        dep_df, x="Dependência", y="IDEB Mediana",
+        dep_df, x="Dependência", y="Aprovação Mediana (%)",
         color="Espaço de Leitura", barmode="group",
         color_discrete_map={
-            "Com Biblioteca/Leitura": "#636EFA",
-            "Sem Biblioteca/Leitura": "#EF553B",
+            "Com Biblioteca": "#636EFA",
+            "Sem Biblioteca": "#EF553B",
         },
-        text="IDEB Mediana",
-        title="IDEB Mediano por Dependência e Espaço de Leitura",
+        text="Aprovação Mediana (%)",
+        title="Taxa de Aprovação Mediana por Dependência e Presença de Biblioteca",
     )
-    fig2.update_traces(texttemplate="%{text:.2f}", textposition="outside")
+    fig2.update_traces(texttemplate="%{text:.1f}%", textposition="outside")
     st.plotly_chart(fig2, use_container_width=True)
 
     st.info(
@@ -841,8 +860,7 @@ def main():
     # Header
     st.title("🏫 Infraestrutura Escolar e Rendimento Educacional — Alagoas 2023")
     st.markdown(
-        "Dashboard baseado nos **Microdados do Censo Escolar 2023** e nos **Resultados do IDEB 2023** (INEP).  \n"
-        "Análises: **Guilherme Henrique Costa Lima · Samuel Cassiano dos Santos · Matheus Ferreira de Lima**"
+        "Dashboard baseado nos **Microdados do Censo Escolar 2023** e nos **Resultados do IDEB 2023** (INEP).  \n"        "Análises: **Guilherme Henrique Costa Lima · Samuel Cassiano dos Santos · Matheus Ferreira de Lima**"
     )
     st.divider()
 
@@ -882,6 +900,8 @@ def main():
     with abas[9]:
         aba_analise9(dfs, filtros)
 
-
 if __name__ == "__main__":
+    main()
+else:
+    # Streamlit executa o módulo como script, não como __main__
     main()
